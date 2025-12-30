@@ -9,7 +9,7 @@ UP, DOWN, LEFT, RIGHT = 0, 1, 2, 3
 
 class BaseAgent(ABC):
     @abstractmethod
-    def act(self, obs: Dict[str, Any], deterministic: bool = False) -> int:
+    def act(self, obs: Dict[str, Any], mode: str = 'train') -> int:
         """Return an action int in {0,1,2,3}."""
         raise NotImplementedError
 
@@ -18,7 +18,7 @@ class RandomAgent(BaseAgent):
         self.n_actions = int(n_actions)
         self.rng = np.random.default_rng(seed)
 
-    def act(self, obs: Dict[str, Any], deterministic: bool = False) -> int:
+    def act(self, obs: Dict[str, Any], mode: str = 'train') -> int:
         # deterministic has no meaning here; always random
         return int(self.rng.integers(0, self.n_actions))
 
@@ -27,7 +27,7 @@ class GreedyGoalAgent(BaseAgent):
     Moves toward the goal by Manhattan distance, ignoring obstacles.
     Great for sanity-checking env + rendering.
     """
-    def act(self, obs: Dict[str, Any], deterministic: bool = True) -> int:
+    def act(self, obs: Dict[str, Any], mode: str = 'train') -> int:
         ar, ac = obs["agent_pos"]
         gr, gc = obs["goal_pos"]
 

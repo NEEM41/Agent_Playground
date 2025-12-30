@@ -27,7 +27,7 @@ def rollout(env: GridWorld, agent, seed: int | None, max_steps: int, color, spri
         facing = ACTION_TO_FACING.get(last_action, "right")
         frames.append(env.render_rgb(cell_size=18, agent_color=color, sprite=sprite, facing=facing))
 
-        a = agent.act(obs, deterministic=True)
+        a = agent.act(obs, mode='eval')
         last_action = int(a)
         obs, r, done, info = env.step(a)
 
@@ -56,6 +56,8 @@ def main():
                     help="Agent sprite style.")
     ap.add_argument("--pacman_all_yellow", action="store_true",
                     help="If set and sprite=pacman, override agent colors with Pac-Man yellow.")
+    ap.add_argument("--mode", choices=["eval", "sample"], default="eval",
+                help="Policy mode used for rendering.")
     args = ap.parse_args()
 
     m = get_map(args.map)
@@ -94,7 +96,7 @@ def main():
                 panels.append(env.render_rgb(cell_size=18, agent_color=use_color, sprite=args.sprite, facing=facing))
 
                 if not env.done:
-                    a = agent.act(obs, deterministic=True)
+                    a = agent.act(obs, mode=args.mode)
                     last_actions[i] = int(a)
                     env.step(a)
 

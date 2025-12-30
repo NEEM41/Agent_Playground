@@ -26,7 +26,7 @@ class BFSAgent:
     def __init__(self, fallback_action: int = UP):
         self.fallback_action = int(fallback_action)
 
-    def act(self, obs: Dict[str, Any], deterministic: bool = True) -> int:
+    def act(self, obs: Dict[str, Any], mode: str = 'train') -> int:
         grid: np.ndarray = obs["grid"]
         start: Tuple[int, int] = obs["agent_pos"]
         goal: Tuple[int, int] = obs["goal_pos"]

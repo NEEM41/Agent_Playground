@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Tuple, Dict, Any, Optional
 import numpy as np
 
-from maps import MapSpec, EMPTY, WALL, TRAP, GOAL
+from envs.maps import MapSpec, EMPTY, WALL, TRAP, GOAL
 
 
 # Actions
@@ -28,11 +28,12 @@ class GridWorldConfig:
     # Rewards
     step_penalty: float = -0.01
     wall_penalty: float = -0.10
-    trap_penalty: float = -0.20
+    trap_penalty: float = -0.50
     goal_reward: float = 1.00
 
     # If True, reaching goal ends episode immediately (recommended)
     terminate_on_goal: bool = True
+    terminate_on_trap: bool = False
 
 
 class DiscreteActionSpace:
@@ -121,35 +122,43 @@ class GridWorld:
         # Step penalty always applies (encourages faster solutions)
         reward += float(self.cfg.step_penalty)
 
-        # Check bounds
+        # -------------------------
+        # Movement blocking: OOB / WALL
+        # -------------------------
         if not self._in_bounds(nr, nc):
-            # Treat OOB as wall
             reward += float(self.cfg.wall_penalty)
             info["hit_wall"] = True
             nr, nc = prev_pos  # stay put
         else:
-            cell = int(self._base_grid[nr, nc])
-            if cell == WALL:
+            next_cell = int(self._base_grid[nr, nc])
+            if next_cell == WALL:
                 reward += float(self.cfg.wall_penalty)
                 info["hit_wall"] = True
                 nr, nc = prev_pos  # stay put
 
-        # Apply move
+        # Apply move (either to new cell or stay put)
         self.agent_pos = (nr, nc)
 
-        # Check landing cell effects
+        # -------------------------
+        # Landing effects: TRAP / GOAL
+        # -------------------------
         cell = int(self._base_grid[self.agent_pos])
+
         if cell == TRAP:
             reward += float(self.cfg.trap_penalty)
             info["hit_trap"] = True
+            if self.cfg.terminate_on_trap:
+                self.done = True
 
-        if self.agent_pos == self.goal_pos or cell == GOAL:
+        if (not self.done) and (self.agent_pos == self.goal_pos or cell == GOAL):
             reward += float(self.cfg.goal_reward)
             info["reached_goal"] = True
             if self.cfg.terminate_on_goal:
                 self.done = True
 
+        # -------------------------
         # Time limit termination
+        # -------------------------
         self.step_count += 1
         if self.step_count >= int(self.cfg.max_steps):
             self.done = True
@@ -170,6 +179,7 @@ class GridWorld:
             "agent_pos": self.agent_pos,     # (r, c)
             "goal_pos": self.goal_pos,       # (r, c)
             "step": self.step_count,
+            "local": self.get_local_view(radius=3),
         }
 
     # Utility
@@ -256,3 +266,31 @@ class GridWorld:
             raise ValueError(f"Unknown sprite '{sprite}'. Use 'box' or 'pacman'.")
 
         return img
+
+    def get_local_view(self, radius: int = 3) -> np.ndarray:
+        """
+        Returns a (2*radius+1, 2*radius+1) patch around the agent.
+        Out-of-bounds treated as WALL.
+        """
+        ar, ac = self.agent_pos
+        k = 2 * radius + 1
+        patch = np.full((k, k), WALL, dtype=np.int32)
+
+        r0 = ar - radius
+        c0 = ac - radius
+
+        for i in range(k):
+            rr = r0 + i
+            if rr < 0 or rr >= self.H:
+                continue
+            for j in range(k):
+                cc = c0 + j
+                if 0 <= cc < self.W:
+                    patch[i, j] = int(self._base_grid[rr, cc])
+
+        # (Optional) mark goal if it lies inside the window
+        gr, gc = self.goal_pos
+        if abs(gr - ar) <= radius and abs(gc - ac) <= radius:
+            patch[gr - r0, gc - c0] = GOAL
+
+        return patch
