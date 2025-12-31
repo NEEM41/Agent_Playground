@@ -26,7 +26,7 @@ class GridWorldConfig:
     max_steps: int = 300
 
     # Rewards
-    step_penalty: float = -0.01
+    step_penalty: float = -0.30
     wall_penalty: float = -0.10
     trap_penalty: float = -0.50
     goal_reward: float = 1.00

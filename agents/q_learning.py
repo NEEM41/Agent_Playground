@@ -45,6 +45,11 @@ class QLearningAgent(BaseAgent):
         if s not in self.Q:
             self.Q[s] = np.zeros(4, dtype=np.float32)
 
+    def _greedy_action(self, q: np.ndarray) -> int:
+        m = float(q.max())
+        best = np.flatnonzero(q == m)
+        return int(self.rng.choice(best))
+
     def act(self, obs: Dict[str, Any], mode: str = "train") -> int:
         """
         mode:
@@ -57,14 +62,14 @@ class QLearningAgent(BaseAgent):
 
         if mode == "eval":
             self.last_was_random = False
-            return int(np.argmax(self.Q[s]))
+            return self._greedy_action(self.Q[s])
 
         if mode == "train":
             if self.rng.random() < self.eps:
                 self.last_was_random = True
                 return int(self.rng.integers(0, 4))
             self.last_was_random = False
-            return int(np.argmax(self.Q[s]))
+            return self._greedy_action(self.Q[s])
 
         if mode == "sample":
             q = self.Q[s]
