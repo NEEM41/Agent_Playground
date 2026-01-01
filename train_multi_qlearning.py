@@ -1,8 +1,14 @@
 # train_multi_qlearning.py
-# Usage examples:
-#   python train_multi_qlearning.py --map tiny_corridor --run_name race_v1 --eval_every 200
-#   python train_multi_qlearning.py --map trap_choice --run_name race_traps --terminate_on_trap --eval_every 200
-#   python train_multi_qlearning.py --map tiny_corridor --run_name race_v1 --eval_every 200 --video_seconds 20 --fps 12
+# 3 learners: default / explorer / cautious (+ BFS + Mimic)
+#
+# Examples:
+#   python train_multi_qlearning.py --map tiny_corridor --run_name threelearners --eval_every 200 --save_policy
+#   python train_multi_qlearning.py --map trap_choice --run_name threelearners_traps --terminate_on_trap --eval_every 200
+#
+# Notes:
+# - Training env is "race": terminate_on_any_goal=True (fast episodes for learning updates)
+# - Video/eval env runs up to --video_seconds or until all agents are done: terminate_on_any_goal=False
+# - IMPORTANT FIX: learners use agent-specific done ONLY (not global done) in Q updates.
 
 from __future__ import annotations
 
@@ -15,9 +21,8 @@ from envs.maps import get_map
 from envs.multi_gridworld import MultiGridWorld, MultiGridWorldConfig
 
 from agents.bfs_agent import BFSAgent
-from agents.base import RandomAgent, GreedyGoalAgent
-from agents.q_learning import QLearningAgent, QLearningConfig
 from agents.mimic_agent import MimicConfig, MimicAgent
+from agents.q_learning import QLearningAgent, QLearningConfig
 
 
 def save_mp4(path, frames, fps=12):
@@ -27,22 +32,19 @@ def save_mp4(path, frames, fps=12):
 def eval_rollout(
     env: MultiGridWorld,
     agents,
-    learner_index: int,
+    learner_indices,
     seed: int,
     max_steps: int,
     sprite: str,
     colors,
-    mode: str = "eval",
+    modes_by_index: dict[int, str],
     cell_size: int = 18,
     stop_when_all_done: bool = True,
 ):
     """
-    Run one evaluation episode and return frames + summary metrics.
-
-    IMPORTANT: This should be used with a *video env config* where:
-      terminate_on_any_goal=False
-    so that the rollout continues after the first goal, and we can stop when
-    everyone is done (or time cap is reached).
+    Eval/video rollout:
+      - env should have terminate_on_any_goal=False so it keeps running
+      - each agent uses modes_by_index[i] if provided, else "eval"
     """
     obs_list = env.reset(seed=seed)
     frames = []
@@ -59,20 +61,15 @@ def eval_rollout(
         actions = []
         for i, agent in enumerate(agents):
             obs_i = obs_list[i]
-
-            # If agent is already done, send a dummy action (env ignores done agents)
             if obs_i.get("done", False):
                 actions.append(0)
                 continue
 
-            if i == learner_index:
-                actions.append(agent.act(obs_i, mode=mode))
-            else:
-                actions.append(agent.act(obs_i, mode="eval"))
+            mode = modes_by_index.get(i, "eval")
+            actions.append(agent.act(obs_i, mode=mode))
 
         obs_list, rewards, done, info = env.step(actions)
 
-        # update stats
         for i in range(len(agents)):
             if info["reached_goal"][i]:
                 reached_goal[i] = True
@@ -83,10 +80,8 @@ def eval_rollout(
 
         t += 1
 
-        # For videos: stop when everyone is done (unless time cap hits first)
-        if stop_when_all_done:
-            if all(o.get("done", False) for o in obs_list):
-                break
+        if stop_when_all_done and all(o.get("done", False) for o in obs_list):
+            break
 
     frames.append(env.render_rgb(cell_size=cell_size, agent_colors=colors, sprite=sprite))
 
@@ -101,31 +96,25 @@ def eval_rollout(
 
 def main():
     ap = argparse.ArgumentParser()
-
     ap.add_argument("--map", default="tiny_corridor")
-    ap.add_argument("--run_name", default="multi_qlearn_v1")
-    ap.add_argument("--episodes", type=int, default=1500)
-
-    # TRAINING episode cap (race episodes are short, but still cap them)
+    ap.add_argument("--run_name", default="three_learners_v1")
+    ap.add_argument("--episodes", type=int, default=2000)
     ap.add_argument("--max_steps", type=int, default=250)
 
-    # Eval / video
     ap.add_argument("--eval_every", type=int, default=200)
     ap.add_argument("--eval_seed", type=int, default=0)
-    ap.add_argument("--eval_mode", choices=["eval", "sample"], default="eval")
-
     ap.add_argument("--sprite", choices=["box", "pacman"], default="pacman")
     ap.add_argument("--cell_size", type=int, default=18)
 
-    ap.add_argument("--save_policy", action="store_true", help="Save policy checkpoints every eval interval")
-    ap.add_argument("--terminate_on_trap", action="store_true", help="If set, traps terminate an agent")
+    ap.add_argument("--save_policy", action="store_true")
+    ap.add_argument("--terminate_on_trap", action="store_true")
+    ap.add_argument("--block_on_collision", action="store_true")
 
-    # Video length control
-    ap.add_argument("--video_seconds", type=float, default=20.0, help="Eval video max length in seconds")
-    ap.add_argument("--fps", type=int, default=12, help="Video FPS (also used to compute video step cap)")
+    ap.add_argument("--video_seconds", type=float, default=20.0)
+    ap.add_argument("--fps", type=int, default=12)
 
-    # Collisions
-    ap.add_argument("--block_on_collision", action="store_true", help="If set, enable collision blocking in env")
+    # Eval control for learners: "eval" (greedy) or "sample" (soft)
+    ap.add_argument("--eval_mode", choices=["eval", "sample"], default="eval")
 
     args = ap.parse_args()
 
@@ -139,38 +128,59 @@ def main():
     # Agents
     # -------------------------
     bfs = BFSAgent()
-    mimic = MimicAgent(MimicConfig(), seed=42)
 
-    qcfg = QLearningConfig()
-    learner = QLearningAgent(qcfg, seed=0)
+    # Mimic: keep it lively but not too chaotic
+    mimic = MimicAgent(MimicConfig(p_random=0.05, max_follow_dist=12), seed=42)
 
-    # NOTE: agent order must match colors and env indexing
-    agents = [bfs, mimic, learner]
-    learner_index = len(agents) - 1
+    # Learner 1: default
+    q_default = QLearningAgent(
+        QLearningConfig(alpha=0.25, gamma=0.99, eps_start=1.0, eps_end=0.05, eps_decay=0.995),
+        seed=0,
+    )
 
+    # Learner 2: explorer (more exploration for longer)
+    q_explorer = QLearningAgent(
+        QLearningConfig(alpha=0.20, gamma=0.99, eps_start=1.0, eps_end=0.10, eps_decay=0.998),
+        seed=1,
+    )
+
+    # Learner 3: cautious (less random, more "settle"; plus recommend map reward penalties for traps)
+    q_cautious = QLearningAgent(
+        QLearningConfig(alpha=0.30, gamma=0.99, eps_start=0.60, eps_end=0.02, eps_decay=0.992),
+        seed=2,
+    )
+
+    # Order matters: env obs_list index == this list index
+    # TODO: Remove
+    # agents = [bfs, mimic, q_default, q_explorer, q_cautious]
+    agents = [q_default, q_explorer, q_cautious]
+    # learner_indices = [2, 3, 4]
+    learner_indices = [0, 1, 2]
+
+    # Colors (must match agents list length)
     colors = [
-        (60, 120, 220),   # bfs  - blue
-        (60, 220, 120),   # mimic - green
-        (255, 215, 0),    # learner - yellow
+        (60, 120, 220),   # bfs      - blue
+        (60, 220, 120),   # mimic    - green
+        (255, 215, 0),    # q_def    - yellow
+        (220, 140, 60),   # explorer - orange
+        (180, 80, 180),   # cautious - purple
     ]
 
     # -------------------------
-    # Two env configs:
-    #   - train_cfg: race ends when ANYONE reaches goal (fast learning updates)
-    #   - video_cfg: do NOT end on first goal; run until all agents are done or time cap
+    # Env configs
     # -------------------------
     train_cfg = MultiGridWorldConfig(
         max_steps=args.max_steps,
-        terminate_on_any_goal=True,    # <-- race termination (TRAINING)
+        terminate_on_any_goal=True,    # TRAIN: race ends when anyone finishes
         terminate_on_goal=True,
         terminate_on_trap=args.terminate_on_trap,
         block_on_collision=bool(args.block_on_collision),
     )
 
-    video_max_steps = int(args.fps * args.video_seconds)
+    video_max_steps = int(args.video_seconds * args.fps)
     video_cfg = MultiGridWorldConfig(
         max_steps=video_max_steps,
-        terminate_on_any_goal=False,   # <-- keep rolling after first goal (VIDEO)
+        terminate_on_any_goal=False,   # VIDEO: keep going until all done or time cap
         terminate_on_goal=True,
         terminate_on_trap=args.terminate_on_trap,
         block_on_collision=bool(args.block_on_collision),
@@ -187,14 +197,29 @@ def main():
         w.writerow(
             [
                 "episode",
-                "train_return",
-                "train_steps",
-                "train_goal",
-                "train_trap",
-                "train_collisions",
-                "epsilon",
+                "steps",
+                "q_default_return",
+                "q_default_goal",
+                "q_default_trap",
+                "q_default_coll",
+                "q_default_eps",
+                "q_explorer_return",
+                "q_explorer_goal",
+                "q_explorer_trap",
+                "q_explorer_coll",
+                "q_explorer_eps",
+                "q_cautious_return",
+                "q_cautious_goal",
+                "q_cautious_trap",
+                "q_cautious_coll",
+                "q_cautious_eps",
             ]
         )
+
+    # Helper: map index -> agent object
+    # TODO: Remove
+    # learners = {2: q_default, 3: q_explorer, 4: q_cautious}
+    learners = {0: q_default, 1: q_explorer, 2: q_cautious}
 
     # -------------------------
     # Training loop
@@ -204,15 +229,15 @@ def main():
         done = False
         t = 0
 
-        total_return = 0.0
-        goal_hit = False
-        trap_hit = False
-        collisions = 0
+        # per-learner episode accumulators
+        ep_return = {i: 0.0 for i in learner_indices}
+        ep_goal = {i: False for i in learner_indices}
+        ep_trap = {i: False for i in learner_indices}
+        ep_coll = {i: 0 for i in learner_indices}
 
         while not done and t < args.max_steps:
             actions = []
-            learner_obs = None
-            learner_action = None
+            transitions = {}  # i -> (obs_i, action_i)
 
             for i, agent in enumerate(agents):
                 obs_i = obs_list[i]
@@ -221,72 +246,86 @@ def main():
                     actions.append(0)
                     continue
 
-                if i == learner_index:
-                    learner_obs = obs_i
+                if i in learners:
                     a = agent.act(obs_i, mode="train")
-                    learner_action = int(a)
-                    actions.append(learner_action)
+                    a = int(a)
+                    actions.append(a)
+                    transitions[i] = (obs_i, a)
                 else:
-                    # Keep non-learners deterministic-ish during training
+                    # keep non-learners stable during training
                     actions.append(agent.act(obs_i, mode="eval"))
 
             next_obs_list, rewards, done, info = env.step(actions)
 
-            # learner update
-            lr = float(rewards[learner_index])
-            total_return += lr
+            # update each learner independently (IMPORTANT: done is per-agent only)
+            for i, (o, a) in transitions.items():
+                r = float(rewards[i])
+                ep_return[i] += r
 
-            if learner_obs is not None and learner_action is not None:
-                learner_next_obs = next_obs_list[learner_index]
+                no = next_obs_list[i]
+                agent_done = bool(no.get("done", False))
+                learners[i].update(o, a, r, no, agent_done)
 
-                # For the learner, treat done if:
-                # - it is done individually, OR
-                # - episode ended (race ended / time cap)
-                learner_done = bool(learner_next_obs.get("done", False)) #or bool(done)
-
-                learner.update(learner_obs, learner_action, lr, learner_next_obs, learner_done)
-
-            # stats
-            if info["reached_goal"][learner_index]:
-                goal_hit = True
-            if info["hit_trap"][learner_index]:
-                trap_hit = True
-            if info["collided"][learner_index]:
-                collisions += 1
+            # stats per learner
+            for i in learner_indices:
+                if info["reached_goal"][i]:
+                    ep_goal[i] = True
+                if info["hit_trap"][i]:
+                    ep_trap[i] = True
+                if info["collided"][i]:
+                    ep_coll[i] += 1
 
             obs_list = next_obs_list
             t += 1
 
-        learner.end_episode()
+        # decay eps per learner
+        for i in learner_indices:
+            learners[i].end_episode()
 
+        # write metrics row
+        #TODO: Remove
         with open(metrics_path, "a", newline="") as f:
-            csv.writer(f).writerow(
+            w = csv.writer(f)
+            w.writerow(
                 [
                     ep,
-                    total_return,
                     t,
-                    int(goal_hit),
-                    int(trap_hit),
-                    int(collisions),
-                    learner.eps,
+                    ep_return[0],
+                    int(ep_goal[0]),
+                    int(ep_trap[0]),
+                    int(ep_coll[0]),
+                    learners[0].eps,
+                    ep_return[1],
+                    int(ep_goal[1]),
+                    int(ep_trap[1]),
+                    int(ep_coll[1]),
+                    learners[1].eps,
+                    ep_return[0],
+                    int(ep_goal[2]),
+                    int(ep_trap[2]),
+                    int(ep_coll[2]),
+                    learners[2].eps,
                 ]
             )
 
-        # -------------------------
-        # Periodic eval video
-        # -------------------------
+        # periodic eval video
         if ep % args.eval_every == 0:
             eval_env = MultiGridWorld(get_map(args.map), n_agents=len(agents), config=video_cfg)
+
+            # everyone deterministic, except optionally let learners be "sample" for lively motion
+            modes_by_index = {i: "eval" for i in range(len(agents))}
+            for i in learner_indices:
+                modes_by_index[i] = args.eval_mode  # "eval" or "sample"
 
             summary = eval_rollout(
                 eval_env,
                 agents,
-                learner_index=learner_index,
+                learner_indices=learner_indices,
                 seed=args.eval_seed,
                 max_steps=video_max_steps,
                 sprite=args.sprite,
                 colors=colors,
-                mode=args.eval_mode,
+                modes_by_index=modes_by_index,
                 cell_size=args.cell_size,
                 stop_when_all_done=True,
             )
@@ -295,20 +334,24 @@ def main():
             save_mp4(vid_path, summary["frames"], fps=args.fps)
 
             if args.save_policy:
-                ckpt_path = f"{policies_dir}/iter_{ep:04d}.npz"
-                learner.save(ckpt_path)
+                # Save only latest checkpoints for each learner (overwrite)
+                learners[2].save(f"{policies_dir}/q_default_latest.npz")
+                learners[3].save(f"{policies_dir}/q_explorer_latest.npz")
+                learners[4].save(f"{policies_dir}/q_cautious_latest.npz")
 
             print(
-                f"[ep {ep}] learner_return={total_return:.2f} steps={t} "
-                f"goal={int(goal_hit)} trap={int(trap_hit)} coll={collisions} eps={learner.eps:.3f} | "
-                f"eval_steps={summary['steps']} eval_goal={int(summary['reached_goal'][learner_index])} "
-                f"video_len={summary['steps']/max(1,args.fps):.1f}s -> {vid_path}"
+                f"[ep {ep}] steps={t} | "
+                f"def_ret={ep_return[0]:.2f} eps={learners[0].eps:.3f} goal={int(ep_goal[0])} | "
+                f"exp_ret={ep_return[1]:.2f} eps={learners[1].eps:.3f} goal={int(ep_goal[1])} | "
+                f"cau_ret={ep_return[2]:.2f} eps={learners[2].eps:.3f} goal={int(ep_goal[2])} | "
+                f"video={summary['steps']/max(1,args.fps):.1f}s -> {vid_path}"
             )
 
-    # Save final policy
-    final_policy_path = f"{outdir}/final_policy.npz"
-    learner.save(final_policy_path)
-    print("Saved final policy:", final_policy_path)
+    # Save final policies
+    learners[0].save(f"{outdir}/q_default_final.npz")
+    learners[1].save(f"{outdir}/q_explorer_final.npz")
+    learners[2].save(f"{outdir}/q_cautious_final.npz")
+    print("Saved final policies to:", outdir)
     print("Done. Metrics:", metrics_path)
 
 
