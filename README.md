@@ -11,7 +11,9 @@ You can train multiple Q-learning agents simultaneously using `train_multi_qlear
 
 To start training, run the following command:
 
-python train_multi_qlearning.py --map tiny_corridor --run_name threelearners --eval_every 200 --save_policyYou can monitor the training progress and watch the generated videos in `runs/threelearners_tiny_corridor/videos`.
+`python train_multi_qlearning.py --map tiny_corridor --run_name threelearners --eval_every 200 --save_policy`. 
+
+You can monitor the training progress and watch the generated videos in `runs/threelearners_tiny_corridor/videos`.
 
 ## Inference and Rendering
 
